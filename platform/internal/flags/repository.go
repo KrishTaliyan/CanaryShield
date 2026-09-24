@@ -207,19 +207,23 @@ func insertFlag(ctx context.Context, q db.Querier, key, name, description string
 	return id, nil
 }
 
-// updateFlag writes the flag's editable columns and bumps its version.
+// updateFlag writes the flag's editable columns and bumps its version,
+// but only if the flag is still at expectedVersion (optimistic check).
 // It returns the new version and update time.
-func updateFlag(ctx context.Context, q db.Querier, f models.Flag) (int, time.Time, error) {
+func updateFlag(ctx context.Context, q db.Querier, f models.Flag, expectedVersion int) (int, time.Time, error) {
 	var version int
 	var updatedAt time.Time
 	err := q.QueryRow(ctx, `
 		UPDATE flags
 		SET name = $2, description = $3, enabled = $4, status = $5, rollout_percentage = $6,
 		    version = version + 1, updated_at = now()
-		WHERE id = $1::text::uuid
+		WHERE id = $1::text::uuid AND version = $7
 		RETURNING version, updated_at`,
-		f.ID, f.Name, f.Description, f.Enabled, f.Status, f.RolloutPercentage,
+		f.ID, f.Name, f.Description, f.Enabled, f.Status, f.RolloutPercentage, expectedVersion,
 	).Scan(&version, &updatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, time.Time{}, fmt.Errorf("%w: %q is no longer at version %d", ErrVersionConflict, f.Key, expectedVersion)
+	}
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("updating flag %q: %w", f.Key, err)
 	}
