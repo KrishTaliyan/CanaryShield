@@ -3,7 +3,10 @@
 package evaluation
 
 import (
+	"context"
+	"log/slog"
 	"slices"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -28,21 +31,85 @@ type Result struct {
 	FlagVersion       int     `json:"flagVersion"`
 }
 
+// Exposure tracking settings.
+const (
+	exposureQueueSize  = 10000
+	exposureFlushEvery = 500 * time.Millisecond
+	exposureWarnEvery  = 30 * time.Second
+)
+
+// ExposureStore records the users who were served a flag's treatment.
+type ExposureStore interface {
+	AddExposures(ctx context.Context, flagKey string, userIDs []string) error
+}
+
+type exposure struct {
+	flagKey string
+	userID  string
+}
+
 // Evaluator evaluates flags against the snapshot.
 type Evaluator struct {
-	snapshot *Snapshot
+	snapshot  *Snapshot
+	exposures chan exposure
 }
 
 // NewEvaluator returns an evaluator reading from snapshot.
 func NewEvaluator(snapshot *Snapshot) *Evaluator {
-	return &Evaluator{snapshot: snapshot}
+	return &Evaluator{snapshot: snapshot, exposures: make(chan exposure, exposureQueueSize)}
 }
 
-// Evaluate serves an SDK request and counts it in ff_evaluations_total.
+// Evaluate serves an SDK request, counts it in ff_evaluations_total and
+// queues an exposure when the treatment is served.
 func (e *Evaluator) Evaluate(flagKey string, ctx map[string]any) Result {
 	r := e.Preview(flagKey, ctx)
 	evaluationsTotal.WithLabelValues(r.FlagKey, r.Variant, r.Reason).Inc()
+	if r.Reason == ReasonInRollout || r.Reason == ReasonOverrideInclude {
+		userID, _ := ctx["userId"].(string)
+		e.trackExposure(r.FlagKey, userID)
+	}
 	return r
+}
+
+// trackExposure queues an exposure without ever blocking the response; when
+// the queue is full the exposure is dropped.
+func (e *Evaluator) trackExposure(flagKey, userID string) {
+	select {
+	case e.exposures <- exposure{flagKey: flagKey, userID: userID}:
+	default:
+	}
+}
+
+// RecordExposures writes queued exposures to store in batches until ctx is
+// done. Writes are fire-and-forget: a failed batch is logged and dropped.
+func (e *Evaluator) RecordExposures(ctx context.Context, store ExposureStore) {
+	ticker := time.NewTicker(exposureFlushEvery)
+	defer ticker.Stop()
+
+	pending := map[string][]string{}
+	var lastWarn time.Time
+	flush := func() {
+		for flagKey, userIDs := range pending {
+			err := store.AddExposures(context.WithoutCancel(ctx), flagKey, userIDs)
+			if err != nil && time.Since(lastWarn) > exposureWarnEvery {
+				slog.Warn("recording exposures failed; dropping them", "flag", flagKey, "users", len(userIDs), "error", err)
+				lastWarn = time.Now()
+			}
+			delete(pending, flagKey)
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			flush()
+			return
+		case x := <-e.exposures:
+			pending[x.flagKey] = append(pending[x.flagKey], x.userID)
+		case <-ticker.C:
+			flush()
+		}
+	}
 }
 
 // Preview evaluates without side effects, for the admin playground.

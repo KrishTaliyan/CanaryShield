@@ -25,8 +25,9 @@ import (
 
 // Service errors. Handlers map them to contract error codes.
 var (
-	ErrNotFound      = errors.New("flag not found")
-	ErrAlreadyExists = errors.New("flag already exists")
+	ErrNotFound        = errors.New("flag not found")
+	ErrAlreadyExists   = errors.New("flag already exists")
+	ErrVersionConflict = errors.New("flag version changed")
 )
 
 // ValidationError reports invalid input (422 VALIDATION_FAILED).
@@ -40,9 +41,18 @@ var keyPattern = regexp.MustCompile(`^[a-z0-9_]{3,64}$`)
 
 const auditEntityFlag = "flag"
 
-// Cache receives every committed flag change (README 9.4 step 3).
+// Cache is the Redis side of a flag: write-through after each commit
+// (README 9.4 step 3), health status and the exposure counter.
 type Cache interface {
 	Store(ctx context.Context, f models.Flag) error
+	HealthStatuses(ctx context.Context, flagKeys []string) (map[string]string, error)
+	ResetExposure(ctx context.Context, flagKey string) error
+}
+
+// Broadcaster sends live events to dashboards (README 9.4 step 4).
+type Broadcaster interface {
+	PublishFlag(f models.Flag)
+	PublishRollout(e models.Event)
 }
 
 // Service implements flag use cases on top of PostgreSQL.
@@ -50,12 +60,13 @@ type Service struct {
 	pool     *pgxpool.Pool
 	snapshot *evaluation.Snapshot
 	cache    Cache
+	events   Broadcaster
 }
 
 // NewService returns a flag service backed by pool. After each commit it
-// updates snapshot and writes the flag through to cache.
-func NewService(pool *pgxpool.Pool, snapshot *evaluation.Snapshot, cache Cache) *Service {
-	return &Service{pool: pool, snapshot: snapshot, cache: cache}
+// updates snapshot, writes the flag through to cache and broadcasts it.
+func NewService(pool *pgxpool.Pool, snapshot *evaluation.Snapshot, cache Cache, events Broadcaster) *Service {
+	return &Service{pool: pool, snapshot: snapshot, cache: cache, events: events}
 }
 
 // CreateInput is the body of POST /flags.
@@ -88,11 +99,21 @@ type GuardrailInput struct {
 
 // change describes the event a flag mutation records.
 type change struct {
-	eventType string
-	from      *float64
-	to        *float64
-	reason    *string
+	eventType     string
+	from          *float64
+	to            *float64
+	reason        *string
+	resetExposure bool
 }
+
+// mutateOptions says who is changing a flag and, for the guardian, which
+// version it expects (0 means any).
+type mutateOptions struct {
+	actor           string
+	expectedVersion int
+}
+
+var byAdmin = mutateOptions{actor: models.ActorAdmin}
 
 // List returns every flag.
 func (s *Service) List(ctx context.Context) ([]models.Flag, error) {
@@ -100,9 +121,11 @@ func (s *Service) List(ctx context.Context) ([]models.Flag, error) {
 	if err != nil {
 		return nil, err
 	}
+	ptrs := make([]*models.Flag, len(list))
 	for i := range list {
-		decorate(&list[i])
+		ptrs[i] = &list[i]
 	}
+	s.decorate(ctx, ptrs...)
 	return list, nil
 }
 
@@ -112,7 +135,7 @@ func (s *Service) Get(ctx context.Context, key string) (models.Flag, error) {
 	if err != nil {
 		return models.Flag{}, err
 	}
-	decorate(&f)
+	s.decorate(ctx, &f)
 	return f, nil
 }
 
@@ -128,6 +151,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (models.Flag, erro
 	}
 
 	var created models.Flag
+	var event models.Event
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		id, err := insertFlag(ctx, tx, in.Key, name, in.Description)
 		if err != nil {
@@ -137,9 +161,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (models.Flag, erro
 		if err != nil {
 			return err
 		}
-		decorate(&f)
+		f.HealthStatus = models.HealthNotMonitored
 
-		if _, err := audit.InsertEvent(ctx, tx, audit.NewEvent{
+		if event, err = audit.InsertEvent(ctx, tx, audit.NewEvent{
 			FlagID: id, FlagKey: f.Key, Type: models.EventCreated, Actor: models.ActorAdmin,
 		}); err != nil {
 			return err
@@ -156,7 +180,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (models.Flag, erro
 	if err != nil {
 		return models.Flag{}, err
 	}
-	s.publish(ctx, created)
+	s.publish(ctx, created, event)
 	return created, nil
 }
 
@@ -174,7 +198,7 @@ func (s *Service) Update(ctx context.Context, key string, in UpdateInput) (model
 		}
 	}
 
-	return s.mutate(ctx, key, func(_ context.Context, _ pgx.Tx, f *models.Flag) (change, error) {
+	return s.mutate(ctx, key, byAdmin, func(_ context.Context, _ pgx.Tx, f *models.Flag) (change, error) {
 		if in.Name != nil {
 			f.Name = name
 		}
@@ -199,7 +223,7 @@ func (s *Service) SetConditions(ctx context.Context, key string, conditions []mo
 		conds[i] = c
 	}
 
-	return s.mutate(ctx, key, func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error) {
+	return s.mutate(ctx, key, byAdmin, func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error) {
 		if err := replaceConditions(ctx, tx, f.ID, conds); err != nil {
 			return change{}, err
 		}
@@ -225,7 +249,7 @@ func (s *Service) SetOverrides(ctx context.Context, key string, include, exclude
 	}
 	overrides := models.Overrides{Include: inc, Exclude: exc}
 
-	return s.mutate(ctx, key, func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error) {
+	return s.mutate(ctx, key, byAdmin, func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error) {
 		if err := replaceOverrides(ctx, tx, f.ID, overrides); err != nil {
 			return change{}, err
 		}
@@ -248,7 +272,7 @@ func (s *Service) SetGuardrail(ctx context.Context, key string, in GuardrailInpu
 		return models.Flag{}, &ValidationError{Message: "consecutiveBreaches must be between 1 and 10"}
 	}
 
-	return s.mutate(ctx, key, func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error) {
+	return s.mutate(ctx, key, byAdmin, func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error) {
 		f.Guardrail.Enabled = in.Enabled
 		f.Guardrail.ErrorRateThreshold = threshold
 		f.Guardrail.MinSamples = in.MinSamples
@@ -260,7 +284,8 @@ func (s *Service) SetGuardrail(ctx context.Context, key string, in GuardrailInpu
 	})
 }
 
-// Rollout applies a rollout action per README 9.4.
+// Rollout applies a rollout action per README 9.4. Start also resets the
+// flag's exposure counter.
 func (s *Service) Rollout(ctx context.Context, key string, action rollout.Action, in RolloutInput) (models.Flag, error) {
 	var pct float64
 	if action == rollout.ActionSet {
@@ -275,15 +300,32 @@ func (s *Service) Rollout(ctx context.Context, key string, action rollout.Action
 		reason = &r
 	}
 
-	return s.mutate(ctx, key, func(_ context.Context, _ pgx.Tx, f *models.Flag) (change, error) {
-		cur := rollout.State{Enabled: f.Enabled, Status: f.Status, Percentage: f.RolloutPercentage}
-		out, err := rollout.Apply(action, cur, f.RolloutSteps, pct)
+	return s.mutate(ctx, key, byAdmin, func(_ context.Context, _ pgx.Tx, f *models.Flag) (change, error) {
+		ch, err := applyRollout(f, action, pct)
+		ch.reason = reason
+		ch.resetExposure = action == rollout.ActionStart
+		return ch, err
+	})
+}
+
+// GuardianRollback rolls a flag back to 0% for the guardian (README 9.5
+// step 4). It fails with ErrVersionConflict unless the flag is still at
+// version. record runs in the same transaction with the flag as it was
+// before the rollback, so the guardian can insert its incident atomically.
+func (s *Service) GuardianRollback(ctx context.Context, key string, version int, reason string,
+	record func(ctx context.Context, tx pgx.Tx, before models.Flag) error) (models.Flag, error) {
+	opts := mutateOptions{actor: models.ActorGuardian, expectedVersion: version}
+	return s.mutate(ctx, key, opts, func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error) {
+		before := *f
+		ch, err := applyRollout(f, rollout.ActionRollback, 0)
 		if err != nil {
 			return change{}, err
 		}
-		from, to := f.RolloutPercentage, out.Percentage
-		f.Enabled, f.Status, f.RolloutPercentage = out.Enabled, out.Status, out.Percentage
-		return change{eventType: out.EventType, from: &from, to: &to, reason: reason}, nil
+		if err := record(ctx, tx, before); err != nil {
+			return change{}, err
+		}
+		ch.reason = &reason
+		return ch, nil
 	})
 }
 
@@ -295,37 +337,57 @@ func (s *Service) ListEvents(ctx context.Context, key string, limit int) ([]mode
 	return audit.ListEvents(ctx, s.pool, key, limit)
 }
 
-// mutate runs one admin change in a single transaction (README 9.4 step 1):
+// applyRollout moves f through the rollout state machine and describes the
+// resulting event.
+func applyRollout(f *models.Flag, action rollout.Action, pct float64) (change, error) {
+	cur := rollout.State{Enabled: f.Enabled, Status: f.Status, Percentage: f.RolloutPercentage}
+	out, err := rollout.Apply(action, cur, f.RolloutSteps, pct)
+	if err != nil {
+		return change{}, err
+	}
+	from, to := f.RolloutPercentage, out.Percentage
+	f.Enabled, f.Status, f.RolloutPercentage = out.Enabled, out.Status, out.Percentage
+	return change{eventType: out.EventType, from: &from, to: &to}, nil
+}
+
+// mutate runs one flag change in a single transaction (README 9.4 step 1):
 // lock the flag, apply the change, bump version, and insert exactly one
 // rollout event and one audit row. After the commit it publishes the flag.
-func (s *Service) mutate(ctx context.Context, key string,
+func (s *Service) mutate(ctx context.Context, key string, opts mutateOptions,
 	apply func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error)) (models.Flag, error) {
+	health := s.healthStatus(ctx, key)
+
 	var after models.Flag
+	var event models.Event
+	var ch change
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		before, err := getFlag(ctx, tx, key, true)
 		if err != nil {
 			return err
 		}
-		decorate(&before)
+		if opts.expectedVersion != 0 && before.Version != opts.expectedVersion {
+			return fmt.Errorf("%w: %q is at version %d, expected %d",
+				ErrVersionConflict, key, before.Version, opts.expectedVersion)
+		}
+		before.HealthStatus = health
 
 		next := before
-		ch, err := apply(ctx, tx, &next)
-		if err != nil {
+		if ch, err = apply(ctx, tx, &next); err != nil {
 			return err
 		}
-		if next.Version, next.UpdatedAt, err = updateFlag(ctx, tx, next); err != nil {
+		if next.Version, next.UpdatedAt, err = updateFlag(ctx, tx, next, before.Version); err != nil {
 			return err
 		}
 
-		if _, err := audit.InsertEvent(ctx, tx, audit.NewEvent{
+		if event, err = audit.InsertEvent(ctx, tx, audit.NewEvent{
 			FlagID: next.ID, FlagKey: next.Key, Type: ch.eventType,
 			FromPercentage: ch.from, ToPercentage: ch.to,
-			Actor: models.ActorAdmin, Reason: ch.reason,
+			Actor: opts.actor, Reason: ch.reason,
 		}); err != nil {
 			return err
 		}
 		if err := audit.InsertAuditLog(ctx, tx, audit.Entry{
-			Actor: models.ActorAdmin, Action: ch.eventType,
+			Actor: opts.actor, Action: ch.eventType,
 			EntityType: auditEntityFlag, EntityID: next.Key, Before: before, After: next,
 		}); err != nil {
 			return err
@@ -336,25 +398,53 @@ func (s *Service) mutate(ctx context.Context, key string,
 	if err != nil {
 		return models.Flag{}, err
 	}
-	s.publish(ctx, after)
+
+	if ch.resetExposure {
+		if err := s.cache.ResetExposure(context.WithoutCancel(ctx), key); err != nil {
+			slog.Warn("resetting exposure counter failed", "flag", key, "error", err)
+		}
+	}
+	s.publish(ctx, after, event)
 	return after, nil
 }
 
-// publish runs README 9.4 steps 2 and 3 after a commit: update the in-memory
-// snapshot, then write through to Redis. A Redis failure is only logged;
-// PostgreSQL stays the source of truth and the reconciler repairs Redis.
-func (s *Service) publish(ctx context.Context, f models.Flag) {
+// publish runs README 9.4 steps 2–4 after a commit: update the in-memory
+// snapshot, write through to Redis, then broadcast the flag and its event.
+// A Redis failure is only logged; PostgreSQL stays the source of truth and
+// the reconciler repairs Redis.
+func (s *Service) publish(ctx context.Context, f models.Flag, event models.Event) {
 	s.snapshot.Set(f)
 	if err := s.cache.Store(context.WithoutCancel(ctx), f); err != nil {
 		slog.Warn("redis write-through failed; evaluation keeps using the in-memory snapshot",
 			"flag", f.Key, "version", f.Version, "error", err)
 	}
+	s.events.PublishFlag(f)
+	s.events.PublishRollout(event)
 }
 
-// decorate fills fields that are not stored in PostgreSQL. No flag is
-// monitored by the guardian yet, so health is always NOT_MONITORED.
-func decorate(f *models.Flag) {
-	f.HealthStatus = models.HealthNotMonitored
+// decorate fills healthStatus from the guardian's Redis health records.
+// Flags without a record, or all flags when Redis is down, are NOT_MONITORED.
+func (s *Service) decorate(ctx context.Context, list ...*models.Flag) {
+	keys := make([]string, len(list))
+	for i, f := range list {
+		keys[i] = f.Key
+	}
+	statuses, err := s.cache.HealthStatuses(ctx, keys)
+	if err != nil {
+		slog.Warn("reading health statuses failed; reporting NOT_MONITORED", "error", err)
+	}
+	for _, f := range list {
+		f.HealthStatus = models.HealthNotMonitored
+		if status, ok := statuses[f.Key]; ok {
+			f.HealthStatus = status
+		}
+	}
+}
+
+func (s *Service) healthStatus(ctx context.Context, key string) string {
+	f := models.Flag{Key: key}
+	s.decorate(ctx, &f)
+	return f.HealthStatus
 }
 
 func validateName(name string) (string, error) {

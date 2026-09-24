@@ -11,13 +11,19 @@ import (
 	"flagguard/platform/internal/config"
 	"flagguard/platform/internal/evaluation"
 	"flagguard/platform/internal/flags"
+	"flagguard/platform/internal/guardian"
+	"flagguard/platform/internal/monitoring"
+	"flagguard/platform/internal/stream"
 )
 
 // Deps are the services the HTTP layer calls.
 type Deps struct {
-	Config    config.Config
-	Flags     *flags.Service
-	Evaluator *evaluation.Evaluator
+	Config     config.Config
+	Flags      *flags.Service
+	Evaluator  *evaluation.Evaluator
+	Prometheus *monitoring.Client
+	Guardian   *guardian.Guardian
+	Stream     *stream.Hub
 }
 
 // NewRouter builds the platform's HTTP handler.
@@ -41,6 +47,12 @@ func NewRouter(d Deps) http.Handler {
 
 	fh := &flagHandlers{flags: d.Flags}
 	eh := &evalHandlers{evaluator: d.Evaluator}
+	mh := &metricsHandlers{flags: d.Flags, prometheus: d.Prometheus}
+	gh := &guardianHandlers{guardian: d.Guardian}
+
+	// The stream authenticates with ?token= instead of a header, so it sits
+	// outside the /api/v1 group's bearer-token middleware.
+	r.With(streamAuth(d.Config.AdminToken)).Get("/api/v1/stream", d.Stream.ServeHTTP)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(adminAuth(d.Config.AdminToken))
@@ -62,6 +74,12 @@ func NewRouter(d Deps) http.Handler {
 		r.Post("/flags/{key}/rollback", fh.rollback)
 		r.Post("/flags/{key}/kill", fh.kill)
 		r.Get("/flags/{key}/events", fh.events)
+		r.Get("/flags/{key}/health", gh.health)
+		r.Get("/flags/{key}/metrics", mh.flagMetrics)
+
+		r.Get("/incidents", gh.listIncidents)
+		r.Get("/incidents/{id}", gh.getIncident)
+		r.Post("/incidents/{id}/resolve", gh.resolveIncident)
 
 		r.Post("/playground/evaluate", eh.playground)
 	})
