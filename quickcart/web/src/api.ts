@@ -25,6 +25,35 @@ export interface Persona {
   betaUser: boolean;
 }
 
+export interface PayRequest {
+  user: Pick<Persona, "userId" | "country" | "plan" | "betaUser">;
+  items: Array<{ productId: string; qty: number }>;
+  amount: number;
+}
+
+export interface PaymentEvaluation {
+  variant: "old" | "new";
+  reason: string;
+}
+
+export interface PaySuccessResponse {
+  orderId: string;
+  status: "confirmed";
+  flow: "old" | "new";
+  evaluation: PaymentEvaluation;
+  durationMs: number;
+}
+
+export interface PayFailureResponse {
+  status: "failed";
+  flow: "old" | "new";
+  error: { code: string; message: string };
+  evaluation: PaymentEvaluation;
+  durationMs: number;
+}
+
+export type PayResponse = PaySuccessResponse | PayFailureResponse;
+
 interface Collection<T> {
   [key: string]: T[];
 }
@@ -59,4 +88,60 @@ export function getProducts(signal?: AbortSignal) {
 
 export function getPersonas(signal?: AbortSignal) {
   return getCollection<Persona>("/api/personas", "personas", signal);
+}
+
+export async function createPayment(request: PayRequest): Promise<PayResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${serverUrl}/api/pay`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+  } catch {
+    throw new Error("Unable to reach QuickCart. Check that its server is running.");
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("QuickCart returned an invalid payment response.");
+  }
+
+  if (
+    typeof payload === "object" && payload !== null
+    && "status" in payload && payload.status === "failed"
+    && "flow" in payload && (payload.flow === "old" || payload.flow === "new")
+    && "error" in payload && typeof payload.error === "object" && payload.error !== null
+    && "code" in payload.error && typeof payload.error.code === "string"
+    && "message" in payload.error && typeof payload.error.message === "string"
+    && "evaluation" in payload && typeof payload.evaluation === "object" && payload.evaluation !== null
+    && "variant" in payload.evaluation && (payload.evaluation.variant === "old" || payload.evaluation.variant === "new")
+    && "reason" in payload.evaluation && typeof payload.evaluation.reason === "string"
+    && "durationMs" in payload && typeof payload.durationMs === "number"
+  ) {
+    return payload as PayFailureResponse;
+  }
+
+  if (
+    response.ok && typeof payload === "object" && payload !== null
+    && "status" in payload && payload.status === "confirmed"
+    && "orderId" in payload && typeof payload.orderId === "string"
+    && "flow" in payload && (payload.flow === "old" || payload.flow === "new")
+    && "evaluation" in payload && typeof payload.evaluation === "object" && payload.evaluation !== null
+    && "variant" in payload.evaluation && (payload.evaluation.variant === "old" || payload.evaluation.variant === "new")
+    && "reason" in payload.evaluation && typeof payload.evaluation.reason === "string"
+    && "durationMs" in payload && typeof payload.durationMs === "number"
+  ) {
+    return payload as PaySuccessResponse;
+  }
+
+  if (typeof payload === "object" && payload !== null && "error" in payload) {
+    const error = payload.error;
+    if (typeof error === "object" && error !== null && "message" in error && typeof error.message === "string") {
+      throw new Error(error.message);
+    }
+  }
+  throw new Error(`QuickCart payment failed (${response.status}).`);
 }

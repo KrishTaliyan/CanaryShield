@@ -1,6 +1,8 @@
 import { Link, useParams } from "react-router-dom";
 import StatusBadge from "../components/StatusBadge";
 import RolloutRing from "../components/RolloutRing";
+import ConditionsEditor from "../components/ConditionsEditor";
+import OverridesEditor from "../components/OverridesEditor";
 import { useFlag, useFlagActions } from "../hooks/useFlag";
 
 function formatTimestamp(value: string) {
@@ -99,6 +101,11 @@ export default function FlagDetail() {
           </div>
         </dl>
       </section>
+
+      <div className="mt-8 space-y-8">
+        <ConditionsEditor flagKey={flag.key} conditions={flag.conditions} />
+        <OverridesEditor flagKey={flag.key} overrides={flag.overrides} />
+      </div>
     </main>
   );
 }
