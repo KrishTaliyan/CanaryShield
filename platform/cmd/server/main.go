@@ -17,7 +17,10 @@ import (
 	"flagguard/platform/internal/db"
 	"flagguard/platform/internal/evaluation"
 	"flagguard/platform/internal/flags"
+	"flagguard/platform/internal/guardian"
 	"flagguard/platform/internal/httpapi"
+	"flagguard/platform/internal/monitoring"
+	"flagguard/platform/internal/stream"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -49,23 +52,36 @@ func run() error {
 	}
 	defer rdb.Close()
 
+	hub := stream.NewHub()
 	snapshot := evaluation.NewSnapshot()
-	flagService := flags.NewService(pool, snapshot, rdb)
+	flagService := flags.NewService(pool, snapshot, rdb, hub)
 	if err := cache.LoadSnapshot(ctx, rdb, flagService, snapshot); err != nil {
 		return err
 	}
 	go rdb.Subscribe(ctx, snapshot, flagService)
 	go cache.RunReconciler(ctx, rdb, flagService, snapshot, cache.ReconcileInterval)
 
+	evaluator := evaluation.NewEvaluator(snapshot)
+	go evaluator.RecordExposures(ctx, rdb)
+
+	prom := monitoring.NewClient(cfg.PrometheusURL)
+	guard := guardian.New(pool, flagService, snapshot, prom, rdb, hub)
+	go guard.Run(ctx)
+
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: httpapi.NewRouter(httpapi.Deps{
-			Config:    cfg,
-			Flags:     flagService,
-			Evaluator: evaluation.NewEvaluator(snapshot),
+			Config:     cfg,
+			Flags:      flagService,
+			Evaluator:  evaluator,
+			Prometheus: prom,
+			Guardian:   guard,
+			Stream:     hub,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	// Close open SSE streams on shutdown so Shutdown does not wait on them.
+	srv.RegisterOnShutdown(hub.Close)
 
 	serveErr := make(chan error, 1)
 	go func() {

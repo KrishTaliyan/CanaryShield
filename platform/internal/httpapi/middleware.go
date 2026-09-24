@@ -22,6 +22,22 @@ func adminAuth(token string) func(http.Handler) http.Handler {
 	}
 }
 
+// streamAuth accepts the admin token as ?token=, because the browser
+// EventSource API cannot send headers (README 8.1), or as a bearer header.
+func streamAuth(token string) func(http.Handler) http.Handler {
+	header := adminAuth(token)
+	return func(next http.Handler) http.Handler {
+		viaHeader := header(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if secureEqual(r.URL.Query().Get("token"), token) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			viaHeader.ServeHTTP(w, r)
+		})
+	}
+}
+
 // sdkAuth requires "X-API-Key: <key>".
 func sdkAuth(key string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {

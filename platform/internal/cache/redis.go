@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -17,10 +19,15 @@ import (
 
 // Redis keys and channel (README 9.9).
 const (
-	flagKeyPrefix  = "ff:flag:"
-	flagsSetKey    = "ff:flags"
-	updatesChannel = "ff:updates"
+	flagKeyPrefix     = "ff:flag:"
+	flagsSetKey       = "ff:flags"
+	updatesChannel    = "ff:updates"
+	healthKeyPrefix   = "ff:health:"
+	exposureKeyPrefix = "ff:exposure:"
 )
+
+// healthTTL is how long a guardian health record lives (README 9.8).
+const healthTTL = 60 * time.Second
 
 // opTimeout bounds every Redis call so an outage never stalls a request.
 const opTimeout = time.Second
@@ -30,9 +37,20 @@ type Redis struct {
 	client *redis.Client
 }
 
+// redisLogger sends go-redis's own messages to slog at debug level. The
+// cache already logs every failed operation as a warning, so the library's
+// per-dial messages would only repeat them several times a second during an
+// outage.
+type redisLogger struct{}
+
+func (redisLogger) Printf(ctx context.Context, format string, v ...any) {
+	slog.DebugContext(ctx, fmt.Sprintf(format, v...), "component", "go-redis")
+}
+
 // NewRedis creates a client for url. It does not connect until first use,
 // so the platform starts even when Redis is down.
 func NewRedis(url string) (*Redis, error) {
+	redis.SetLogger(redisLogger{})
 	opts, err := redis.ParseURL(url)
 	if err != nil {
 		return nil, fmt.Errorf("parsing redis url: %w", err)
@@ -205,4 +223,134 @@ func (r *Redis) loadAll(ctx context.Context) ([]models.Flag, error) {
 		list = append(list, f)
 	}
 	return list, nil
+}
+
+// SaveHealth replaces the flag's health record and sets its 60 s TTL.
+func (r *Redis) SaveHealth(ctx context.Context, h models.Health) error {
+	fields := map[string]any{
+		"status":      h.Status,
+		"samples":     h.Samples,
+		"breachCount": h.BreachCount,
+		"threshold":   h.Threshold,
+	}
+	if h.CanaryErrorRate != nil {
+		fields["canaryErrorRate"] = *h.CanaryErrorRate
+	}
+	if h.BaselineErrorRate != nil {
+		fields["baselineErrorRate"] = *h.BaselineErrorRate
+	}
+	if h.CheckedAt != nil {
+		fields["checkedAt"] = h.CheckedAt.UTC().Format(time.RFC3339Nano)
+	}
+
+	key := healthKeyPrefix + h.FlagKey
+	ctx, cancel := context.WithTimeout(ctx, opTimeout)
+	defer cancel()
+	_, err := r.client.TxPipelined(ctx, func(p redis.Pipeliner) error {
+		p.Del(ctx, key)
+		p.HSet(ctx, key, fields)
+		p.Expire(ctx, key, healthTTL)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("saving health for %q: %w", h.FlagKey, err)
+	}
+	return nil
+}
+
+// LoadHealth reads a flag's health record. found is false when none exists.
+func (r *Redis) LoadHealth(ctx context.Context, flagKey string) (h models.Health, found bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, opTimeout)
+	defer cancel()
+	fields, err := r.client.HGetAll(ctx, healthKeyPrefix+flagKey).Result()
+	if err != nil {
+		return models.Health{}, false, fmt.Errorf("loading health for %q: %w", flagKey, err)
+	}
+	if len(fields) == 0 {
+		return models.Health{}, false, nil
+	}
+
+	h = models.Health{FlagKey: flagKey, Status: fields["status"]}
+	h.Samples, _ = strconv.Atoi(fields["samples"])
+	h.BreachCount, _ = strconv.Atoi(fields["breachCount"])
+	h.Threshold, _ = strconv.ParseFloat(fields["threshold"], 64)
+	h.CanaryErrorRate = parseOptionalFloat(fields["canaryErrorRate"])
+	h.BaselineErrorRate = parseOptionalFloat(fields["baselineErrorRate"])
+	if t, err := time.Parse(time.RFC3339Nano, fields["checkedAt"]); err == nil {
+		h.CheckedAt = &t
+	}
+	return h, true, nil
+}
+
+// HealthStatuses returns the health status of each flag that has a record.
+func (r *Redis) HealthStatuses(ctx context.Context, flagKeys []string) (map[string]string, error) {
+	statuses := make(map[string]string, len(flagKeys))
+	if len(flagKeys) == 0 {
+		return statuses, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, opTimeout)
+	defer cancel()
+	cmds := make([]*redis.StringCmd, len(flagKeys))
+	_, err := r.client.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for i, key := range flagKeys {
+			cmds[i] = p.HGet(ctx, healthKeyPrefix+key, "status")
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("loading health statuses: %w", err)
+	}
+	for i, cmd := range cmds {
+		if status, err := cmd.Result(); err == nil && status != "" {
+			statuses[flagKeys[i]] = status
+		}
+	}
+	return statuses, nil
+}
+
+// AddExposures records users served the treatment in the flag's HyperLogLog.
+func (r *Redis) AddExposures(ctx context.Context, flagKey string, userIDs []string) error {
+	members := make([]any, len(userIDs))
+	for i, id := range userIDs {
+		members[i] = id
+	}
+	ctx, cancel := context.WithTimeout(ctx, opTimeout)
+	defer cancel()
+	if err := r.client.PFAdd(ctx, exposureKeyPrefix+flagKey, members...).Err(); err != nil {
+		return fmt.Errorf("recording exposures for %q: %w", flagKey, err)
+	}
+	return nil
+}
+
+// ExposureCount returns the approximate number of distinct exposed users.
+func (r *Redis) ExposureCount(ctx context.Context, flagKey string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, opTimeout)
+	defer cancel()
+	n, err := r.client.PFCount(ctx, exposureKeyPrefix+flagKey).Result()
+	if err != nil {
+		return 0, fmt.Errorf("counting exposures for %q: %w", flagKey, err)
+	}
+	return int(n), nil
+}
+
+// ResetExposure clears the flag's exposure counter.
+func (r *Redis) ResetExposure(ctx context.Context, flagKey string) error {
+	ctx, cancel := context.WithTimeout(ctx, opTimeout)
+	defer cancel()
+	if err := r.client.Del(ctx, exposureKeyPrefix+flagKey).Err(); err != nil {
+		return fmt.Errorf("resetting exposures for %q: %w", flagKey, err)
+	}
+	return nil
+}
+
+func parseOptionalFloat(s string) *float64 {
+	if s == "" {
+		return nil
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil
+	}
+	return &v
 }

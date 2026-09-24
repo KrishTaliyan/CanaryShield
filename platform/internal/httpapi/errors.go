@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"flagguard/platform/internal/audit"
 	"flagguard/platform/internal/flags"
 	"flagguard/platform/internal/rollout"
 )
@@ -56,10 +57,12 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusUnprocessableEntity, CodeValidationFailed, validationErr.Message)
 	case errors.As(err, &transitionErr):
 		writeError(w, http.StatusConflict, CodeInvalidTransition, transitionErr.Message)
-	case errors.Is(err, flags.ErrNotFound):
+	case errors.Is(err, flags.ErrNotFound), errors.Is(err, audit.ErrIncidentNotFound):
 		writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
 	case errors.Is(err, flags.ErrAlreadyExists):
 		writeError(w, http.StatusConflict, CodeAlreadyExists, err.Error())
+	case errors.Is(err, flags.ErrVersionConflict):
+		writeError(w, http.StatusConflict, CodeVersionConflict, err.Error())
 	default:
 		slog.Error("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 		writeError(w, http.StatusInternalServerError, CodeInternal, "internal server error")

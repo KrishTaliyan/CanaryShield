@@ -65,6 +65,16 @@ func (s *Snapshot) Replace(list []models.Flag) {
 	s.flags.Store(&next)
 }
 
+// All returns every flag held. Callers must not modify them.
+func (s *Snapshot) All() []*models.Flag {
+	cur := *s.flags.Load()
+	list := make([]*models.Flag, 0, len(cur))
+	for _, f := range cur {
+		list = append(list, f)
+	}
+	return list
+}
+
 // Len returns the number of flags held.
 func (s *Snapshot) Len() int {
 	return len(*s.flags.Load())
