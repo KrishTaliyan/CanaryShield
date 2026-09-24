@@ -2,6 +2,7 @@ import { Link, Outlet, useLocation } from "react-router-dom";
 
 const navigation = [
   { label: "Flags", href: "/" },
+  { label: "Create flag", href: "/flags/new" },
   { label: "Incidents", href: "/incidents" },
   { label: "Playground", href: "/playground" },
 ];
@@ -18,7 +19,7 @@ export default function Layout() {
         <nav aria-label="Main navigation" className="flex gap-1 overflow-x-auto p-3 md:flex-col">
           {navigation.map((item) => {
             const active = item.href === "/"
-              ? location.pathname === "/" || location.pathname.startsWith("/flags/")
+              ? location.pathname === "/" || (location.pathname.startsWith("/flags/") && location.pathname !== "/flags/new")
               : location.pathname === item.href;
             return (
               <Link
