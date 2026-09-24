@@ -222,6 +222,57 @@ function makeFlag(input: Record<string, unknown>): Flag {
   return flag;
 }
 
+function normalizedNumber(value: unknown) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function valuesEqual(actual: unknown, expected: unknown) {
+  if (typeof actual === "boolean") {
+    if (typeof expected === "boolean") return actual === expected;
+    if (typeof expected === "string" && /^(true|false)$/i.test(expected)) {
+      return actual === (expected.toLowerCase() === "true");
+    }
+    return false;
+  }
+  if (typeof actual === "number") {
+    const expectedNumber = normalizedNumber(expected);
+    return expectedNumber !== null && actual === expectedNumber;
+  }
+  if (typeof actual === "string") {
+    return actual.toLowerCase() === String(expected).toLowerCase();
+  }
+  return actual === expected;
+}
+
+function conditionMatches(condition: Condition, context: Record<string, unknown>) {
+  const exists = Object.prototype.hasOwnProperty.call(context, condition.attribute);
+  if (condition.operator === "exists") return exists;
+  if (!exists) return false;
+
+  const actual = context[condition.attribute];
+  const expected = condition.values[0];
+  switch (condition.operator) {
+    case "eq": return valuesEqual(actual, expected);
+    case "neq": return !valuesEqual(actual, expected);
+    case "in": return condition.values.some((value) => valuesEqual(actual, value));
+    case "not_in": return !condition.values.some((value) => valuesEqual(actual, value));
+    case "gt": {
+      const left = normalizedNumber(actual);
+      const right = normalizedNumber(expected);
+      return left !== null && right !== null && left > right;
+    }
+    case "lt": {
+      const left = normalizedNumber(actual);
+      const right = normalizedNumber(expected);
+      return left !== null && right !== null && left < right;
+    }
+    default: return false;
+  }
+}
+
 function runRolloutAction(flag: Flag, action: string, body: Record<string, unknown>) {
   const before = flag.rolloutPercentage;
 
@@ -304,7 +355,7 @@ function evaluate(flagKey: string, context: Record<string, unknown>) {
   }
   const control = { variant: flag.controlVariant as "old", bucket: -1 };
   const userId = typeof context.userId === "string" ? context.userId : "";
-  let reason: "NOT_STARTED" | "KILL_SWITCH" | "ROLLED_BACK" | "OVERRIDE_EXCLUDE" | "OVERRIDE_INCLUDE" | "NO_BUCKET_KEY" | "IN_ROLLOUT" | "OUTSIDE_ROLLOUT";
+  let reason: "NOT_STARTED" | "KILL_SWITCH" | "ROLLED_BACK" | "OVERRIDE_EXCLUDE" | "OVERRIDE_INCLUDE" | "NOT_ELIGIBLE" | "NO_BUCKET_KEY" | "IN_ROLLOUT" | "OUTSIDE_ROLLOUT";
   let variant: "old" | "new" = control.variant;
   let bucket = -1;
 
@@ -315,7 +366,8 @@ function evaluate(flagKey: string, context: Record<string, unknown>) {
   else if (flag.overrides.include.includes(userId)) {
     reason = "OVERRIDE_INCLUDE";
     variant = "new";
-  } else if (!userId) reason = "NO_BUCKET_KEY";
+  } else if (!flag.conditions.every((condition) => conditionMatches(condition, context))) reason = "NOT_ELIGIBLE";
+  else if (!userId) reason = "NO_BUCKET_KEY";
   else {
     bucket = [...`${flag.key}:${userId}`].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) % 10000, 0);
     const cutoff = Math.round(flag.rolloutPercentage * 100);
