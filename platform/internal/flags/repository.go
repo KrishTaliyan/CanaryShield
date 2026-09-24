@@ -2,6 +2,7 @@ package flags
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -151,7 +152,7 @@ func loadOverrides(ctx context.Context, q db.Querier, ids []string, byID map[str
 		SELECT flag_id::text, user_id, kind
 		FROM flag_overrides
 		WHERE flag_id = ANY($1::text[]::uuid[])
-		ORDER BY user_id`, ids)
+		ORDER BY user_id COLLATE "C"`, ids)
 	if err != nil {
 		return fmt.Errorf("querying overrides: %w", err)
 	}
@@ -223,4 +224,64 @@ func updateFlag(ctx context.Context, q db.Querier, f models.Flag) (int, time.Tim
 		return 0, time.Time{}, fmt.Errorf("updating flag %q: %w", f.Key, err)
 	}
 	return version, updatedAt.UTC(), nil
+}
+
+// replaceConditions swaps a flag's conditions for conds, keeping their order.
+func replaceConditions(ctx context.Context, q db.Querier, flagID string, conds []models.Condition) error {
+	if _, err := q.Exec(ctx, `DELETE FROM targeting_conditions WHERE flag_id = $1::text::uuid`, flagID); err != nil {
+		return fmt.Errorf("deleting conditions: %w", err)
+	}
+	for i, c := range conds {
+		values, err := json.Marshal(c.Values)
+		if err != nil {
+			return fmt.Errorf("encoding condition values: %w", err)
+		}
+		_, err = q.Exec(ctx, `
+			INSERT INTO targeting_conditions (flag_id, sort_order, attribute, operator, match_values)
+			VALUES ($1::text::uuid, $2, $3, $4, $5)`,
+			flagID, i, c.Attribute, c.Operator, values,
+		)
+		if err != nil {
+			return fmt.Errorf("inserting condition: %w", err)
+		}
+	}
+	return nil
+}
+
+// replaceOverrides swaps a flag's include and exclude lists.
+func replaceOverrides(ctx context.Context, q db.Querier, flagID string, o models.Overrides) error {
+	if _, err := q.Exec(ctx, `DELETE FROM flag_overrides WHERE flag_id = $1::text::uuid`, flagID); err != nil {
+		return fmt.Errorf("deleting overrides: %w", err)
+	}
+	insert := func(kind string, userIDs []string) error {
+		for _, userID := range userIDs {
+			_, err := q.Exec(ctx, `
+				INSERT INTO flag_overrides (flag_id, user_id, kind)
+				VALUES ($1::text::uuid, $2, $3)`,
+				flagID, userID, kind,
+			)
+			if err != nil {
+				return fmt.Errorf("inserting %s override: %w", kind, err)
+			}
+		}
+		return nil
+	}
+	if err := insert("include", o.Include); err != nil {
+		return err
+	}
+	return insert("exclude", o.Exclude)
+}
+
+// updateGuardrail writes a flag's editable guardrail settings.
+func updateGuardrail(ctx context.Context, q db.Querier, flagID string, g models.Guardrail) error {
+	_, err := q.Exec(ctx, `
+		UPDATE guardrails
+		SET enabled = $2, error_rate_threshold = $3, min_samples = $4, consecutive_breaches = $5
+		WHERE flag_id = $1::text::uuid`,
+		flagID, g.Enabled, g.ErrorRateThreshold, g.MinSamples, g.ConsecutiveBreaches,
+	)
+	if err != nil {
+		return fmt.Errorf("updating guardrail: %w", err)
+	}
+	return nil
 }

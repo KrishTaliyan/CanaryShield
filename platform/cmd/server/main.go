@@ -12,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"flagguard/platform/internal/cache"
 	"flagguard/platform/internal/config"
 	"flagguard/platform/internal/db"
+	"flagguard/platform/internal/evaluation"
 	"flagguard/platform/internal/flags"
 	"flagguard/platform/internal/httpapi"
 )
@@ -41,11 +43,26 @@ func run() error {
 	}
 	defer pool.Close()
 
+	rdb, err := cache.NewRedis(cfg.RedisURL)
+	if err != nil {
+		return err
+	}
+	defer rdb.Close()
+
+	snapshot := evaluation.NewSnapshot()
+	flagService := flags.NewService(pool, snapshot, rdb)
+	if err := cache.LoadSnapshot(ctx, rdb, flagService, snapshot); err != nil {
+		return err
+	}
+	go rdb.Subscribe(ctx, snapshot, flagService)
+	go cache.RunReconciler(ctx, rdb, flagService, snapshot, cache.ReconcileInterval)
+
 	srv := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: httpapi.NewRouter(httpapi.Deps{
-			Config: cfg,
-			Flags:  flags.NewService(pool),
+			Config:    cfg,
+			Flags:     flagService,
+			Evaluator: evaluation.NewEvaluator(snapshot),
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

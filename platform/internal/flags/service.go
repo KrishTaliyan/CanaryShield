@@ -1,11 +1,15 @@
-// Package flags manages feature flags: CRUD and rollout changes.
+// Package flags manages feature flags: CRUD, targeting, guardrails and
+// rollout changes.
 package flags
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"math"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -13,8 +17,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"flagguard/platform/internal/audit"
+	"flagguard/platform/internal/evaluation"
 	"flagguard/platform/internal/models"
 	"flagguard/platform/internal/rollout"
+	"flagguard/platform/internal/targeting"
 )
 
 // Service errors. Handlers map them to contract error codes.
@@ -34,14 +40,22 @@ var keyPattern = regexp.MustCompile(`^[a-z0-9_]{3,64}$`)
 
 const auditEntityFlag = "flag"
 
-// Service implements flag use cases on top of PostgreSQL.
-type Service struct {
-	pool *pgxpool.Pool
+// Cache receives every committed flag change (README 9.4 step 3).
+type Cache interface {
+	Store(ctx context.Context, f models.Flag) error
 }
 
-// NewService returns a flag service backed by pool.
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool}
+// Service implements flag use cases on top of PostgreSQL.
+type Service struct {
+	pool     *pgxpool.Pool
+	snapshot *evaluation.Snapshot
+	cache    Cache
+}
+
+// NewService returns a flag service backed by pool. After each commit it
+// updates snapshot and writes the flag through to cache.
+func NewService(pool *pgxpool.Pool, snapshot *evaluation.Snapshot, cache Cache) *Service {
+	return &Service{pool: pool, snapshot: snapshot, cache: cache}
 }
 
 // CreateInput is the body of POST /flags.
@@ -62,6 +76,14 @@ type UpdateInput struct {
 type RolloutInput struct {
 	Percentage float64
 	Reason     string
+}
+
+// GuardrailInput is the body of PUT /flags/{key}/guardrail.
+type GuardrailInput struct {
+	Enabled             bool
+	ErrorRateThreshold  float64
+	MinSamples          int
+	ConsecutiveBreaches int
 }
 
 // change describes the event a flag mutation records.
@@ -134,6 +156,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (models.Flag, erro
 	if err != nil {
 		return models.Flag{}, err
 	}
+	s.publish(ctx, created)
 	return created, nil
 }
 
@@ -151,7 +174,7 @@ func (s *Service) Update(ctx context.Context, key string, in UpdateInput) (model
 		}
 	}
 
-	return s.mutate(ctx, key, func(f *models.Flag) (change, error) {
+	return s.mutate(ctx, key, func(_ context.Context, _ pgx.Tx, f *models.Flag) (change, error) {
 		if in.Name != nil {
 			f.Name = name
 		}
@@ -159,6 +182,81 @@ func (s *Service) Update(ctx context.Context, key string, in UpdateInput) (model
 			f.Description = *in.Description
 		}
 		return change{eventType: models.EventUpdated}, nil
+	})
+}
+
+// SetConditions replaces a flag's targeting conditions.
+func (s *Service) SetConditions(ctx context.Context, key string, conditions []models.Condition) (models.Flag, error) {
+	conds := make([]models.Condition, len(conditions))
+	for i, c := range conditions {
+		c.Attribute = strings.TrimSpace(c.Attribute)
+		if c.Values == nil {
+			c.Values = []any{}
+		}
+		if err := targeting.ValidateCondition(c); err != nil {
+			return models.Flag{}, &ValidationError{Message: fmt.Sprintf("conditions[%d]: %v", i, err)}
+		}
+		conds[i] = c
+	}
+
+	return s.mutate(ctx, key, func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error) {
+		if err := replaceConditions(ctx, tx, f.ID, conds); err != nil {
+			return change{}, err
+		}
+		f.Conditions = conds
+		return change{eventType: models.EventConditionsChanged}, nil
+	})
+}
+
+// SetOverrides replaces a flag's include and exclude lists.
+func (s *Service) SetOverrides(ctx context.Context, key string, include, exclude []string) (models.Flag, error) {
+	inc, err := normalizeUserIDs("include", include)
+	if err != nil {
+		return models.Flag{}, err
+	}
+	exc, err := normalizeUserIDs("exclude", exclude)
+	if err != nil {
+		return models.Flag{}, err
+	}
+	for _, id := range inc {
+		if slices.Contains(exc, id) {
+			return models.Flag{}, &ValidationError{Message: fmt.Sprintf("user %q cannot be in both include and exclude", id)}
+		}
+	}
+	overrides := models.Overrides{Include: inc, Exclude: exc}
+
+	return s.mutate(ctx, key, func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error) {
+		if err := replaceOverrides(ctx, tx, f.ID, overrides); err != nil {
+			return change{}, err
+		}
+		f.Overrides = overrides
+		return change{eventType: models.EventOverridesChanged}, nil
+	})
+}
+
+// SetGuardrail updates a flag's automatic-rollback settings. The PromQL
+// queries are not editable and stay unchanged.
+func (s *Service) SetGuardrail(ctx context.Context, key string, in GuardrailInput) (models.Flag, error) {
+	// NUMERIC(6,4) stores four decimals.
+	threshold := math.Round(in.ErrorRateThreshold*10000) / 10000
+	switch {
+	case threshold <= 0 || threshold >= 1:
+		return models.Flag{}, &ValidationError{Message: "errorRateThreshold must be greater than 0 and less than 1"}
+	case in.MinSamples < 1 || in.MinSamples > 10000:
+		return models.Flag{}, &ValidationError{Message: "minSamples must be between 1 and 10000"}
+	case in.ConsecutiveBreaches < 1 || in.ConsecutiveBreaches > 10:
+		return models.Flag{}, &ValidationError{Message: "consecutiveBreaches must be between 1 and 10"}
+	}
+
+	return s.mutate(ctx, key, func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error) {
+		f.Guardrail.Enabled = in.Enabled
+		f.Guardrail.ErrorRateThreshold = threshold
+		f.Guardrail.MinSamples = in.MinSamples
+		f.Guardrail.ConsecutiveBreaches = in.ConsecutiveBreaches
+		if err := updateGuardrail(ctx, tx, f.ID, f.Guardrail); err != nil {
+			return change{}, err
+		}
+		return change{eventType: models.EventGuardrailChanged}, nil
 	})
 }
 
@@ -177,7 +275,7 @@ func (s *Service) Rollout(ctx context.Context, key string, action rollout.Action
 		reason = &r
 	}
 
-	return s.mutate(ctx, key, func(f *models.Flag) (change, error) {
+	return s.mutate(ctx, key, func(_ context.Context, _ pgx.Tx, f *models.Flag) (change, error) {
 		cur := rollout.State{Enabled: f.Enabled, Status: f.Status, Percentage: f.RolloutPercentage}
 		out, err := rollout.Apply(action, cur, f.RolloutSteps, pct)
 		if err != nil {
@@ -199,8 +297,9 @@ func (s *Service) ListEvents(ctx context.Context, key string, limit int) ([]mode
 
 // mutate runs one admin change in a single transaction (README 9.4 step 1):
 // lock the flag, apply the change, bump version, and insert exactly one
-// rollout event and one audit row.
-func (s *Service) mutate(ctx context.Context, key string, apply func(f *models.Flag) (change, error)) (models.Flag, error) {
+// rollout event and one audit row. After the commit it publishes the flag.
+func (s *Service) mutate(ctx context.Context, key string,
+	apply func(ctx context.Context, tx pgx.Tx, f *models.Flag) (change, error)) (models.Flag, error) {
 	var after models.Flag
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		before, err := getFlag(ctx, tx, key, true)
@@ -210,7 +309,7 @@ func (s *Service) mutate(ctx context.Context, key string, apply func(f *models.F
 		decorate(&before)
 
 		next := before
-		ch, err := apply(&next)
+		ch, err := apply(ctx, tx, &next)
 		if err != nil {
 			return err
 		}
@@ -237,7 +336,19 @@ func (s *Service) mutate(ctx context.Context, key string, apply func(f *models.F
 	if err != nil {
 		return models.Flag{}, err
 	}
+	s.publish(ctx, after)
 	return after, nil
+}
+
+// publish runs README 9.4 steps 2 and 3 after a commit: update the in-memory
+// snapshot, then write through to Redis. A Redis failure is only logged;
+// PostgreSQL stays the source of truth and the reconciler repairs Redis.
+func (s *Service) publish(ctx context.Context, f models.Flag) {
+	s.snapshot.Set(f)
+	if err := s.cache.Store(context.WithoutCancel(ctx), f); err != nil {
+		slog.Warn("redis write-through failed; evaluation keeps using the in-memory snapshot",
+			"flag", f.Key, "version", f.Version, "error", err)
+	}
 }
 
 // decorate fills fields that are not stored in PostgreSQL. No flag is
@@ -252,4 +363,21 @@ func validateName(name string) (string, error) {
 		return "", &ValidationError{Message: "name must be 1 to 100 characters"}
 	}
 	return name, nil
+}
+
+// normalizeUserIDs trims, de-duplicates and sorts user IDs, rejecting blanks.
+// The result is sorted to match the order the repository reads them back in.
+func normalizeUserIDs(field string, ids []string) ([]string, error) {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return nil, &ValidationError{Message: field + " cannot contain empty user IDs"}
+		}
+		if !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
 }
