@@ -1,8 +1,7 @@
 import { mockChaosRequest } from "../mocks/fixtures";
 import { ApiError, useMocks } from "./client";
+import { quickcartUrl } from "./quickcart";
 import type { ApiErrorBody, ChaosConfig, ChaosRequest } from "./types";
-
-const quickcartUrl = (import.meta.env.VITE_QUICKCART_URL || "http://localhost:4000").replace(/\/$/, "");
 
 async function chaosRequest(options: RequestInit = {}): Promise<ChaosConfig> {
   if (useMocks) return mockChaosRequest(options);

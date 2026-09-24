@@ -3,6 +3,7 @@ declare global {
     readonly VITE_PLATFORM_URL?: string;
     readonly VITE_ADMIN_TOKEN?: string;
     readonly VITE_QUICKCART_URL?: string;
+    readonly VITE_QUICKCART_WEB_URL?: string;
     readonly VITE_USE_MOCKS?: string;
   }
 
@@ -78,6 +79,8 @@ export interface Health {
 
 export type MetricPoint = [unixSeconds: number, value: number];
 
+export type MetricsRange = "5m" | "15m" | "30m" | "1h" | "6h" | "24h";
+
 export interface Metrics {
   flagKey: string;
   threshold: number;
@@ -88,6 +91,9 @@ export interface Metrics {
     baselineErrorRate: MetricPoint[];
     rpsNew: MetricPoint[];
     rpsOld: MetricPoint[];
+    /** p95 payment latency in seconds; absent on platforms older than this dashboard. */
+    latencyP95New?: MetricPoint[];
+    latencyP95Old?: MetricPoint[];
   };
 }
 
@@ -154,6 +160,14 @@ export interface ChaosRequest {
   latencyMs?: number;
   latencyRate?: number;
   durationSec?: number;
+}
+
+export interface Persona {
+  userId: string;
+  name: string;
+  country: string;
+  plan: "free" | "premium";
+  betaUser: boolean;
 }
 
 export interface ApiErrorBody {

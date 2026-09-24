@@ -5,7 +5,11 @@ const requestTimeoutMs = 50;
 const evaluations = new Map();
 
 function stableResult() {
-  return { variant: "old", reason: "PLATFORM_UNAVAILABLE" };
+  return { variant: "old", reason: "PLATFORM_UNAVAILABLE", rolloutPercentage: null };
+}
+
+function rolloutOf(result) {
+  return typeof result.rolloutPercentage === "number" ? result.rolloutPercentage : null;
 }
 
 function pruneExpired(now) {
@@ -46,9 +50,9 @@ export async function evaluateFlag(flagKey, context) {
     if (response.ok) {
       const result = await response.json();
       if (["old", "new"].includes(result.variant) && typeof result.reason === "string") {
-        value = { variant: result.variant, reason: result.reason };
+        value = { variant: result.variant, reason: result.reason, rolloutPercentage: rolloutOf(result) };
       } else if (result.variant === "off" && typeof result.reason === "string") {
-        value = { variant: "old", reason: result.reason };
+        value = { variant: "old", reason: result.reason, rolloutPercentage: rolloutOf(result) };
       }
     }
   } catch {

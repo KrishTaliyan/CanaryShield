@@ -1,6 +1,7 @@
 import type {
   ChaosConfig,
   Condition,
+  Persona,
   Event,
   EventType,
   Flag,
@@ -481,7 +482,7 @@ export async function mockApiRequest<T>(path: string, options: RequestInit = {})
         };
       } else if (suffix === "metrics" && method === "GET") {
         const range = new URLSearchParams(queryString).get("range") || "5m";
-        const rangeSeconds = range === "15m" ? 900 : range === "30m" ? 1800 : 300;
+        const rangeSeconds = ({ "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "6h": 21600, "24h": 86400 } as Record<string, number>)[range] ?? 300;
         const stepSeconds = rangeSeconds / 60;
         const share = flag.rolloutPercentage / 100;
         result = {
@@ -494,6 +495,8 @@ export async function mockApiRequest<T>(path: string, options: RequestInit = {})
             baselineErrorRate: mockMetricSeries(rangeSeconds, stepSeconds, 0.01, 0.003),
             rpsNew: share > 0 ? mockMetricSeries(rangeSeconds, stepSeconds, 30 * share, 0.6) : [],
             rpsOld: mockMetricSeries(rangeSeconds, stepSeconds, 30 * (1 - share), 0.8),
+            latencyP95New: share > 0 ? mockMetricSeries(rangeSeconds, stepSeconds, 0.095, 0.01) : [],
+            latencyP95Old: mockMetricSeries(rangeSeconds, stepSeconds, 0.145, 0.008),
           },
         };
       } else if (suffix === "events" && method === "GET") {
@@ -546,3 +549,29 @@ export async function mockChaosRequest(options: RequestInit = {}): Promise<Chaos
   }
   return copy(chaos);
 }
+
+export const mockPersonas: Persona[] = [
+  { userId: "u_demo_canary", name: "Demo Canary", country: "India", plan: "premium", betaUser: true },
+  { userId: "u_aarav", name: "Aarav", country: "India", plan: "premium", betaUser: true },
+  { userId: "u_diya", name: "Diya", country: "India", plan: "free", betaUser: true },
+  { userId: "u_rohan", name: "Rohan", country: "India", plan: "free", betaUser: false },
+  { userId: "u_emma", name: "Emma", country: "US", plan: "premium", betaUser: false },
+  { userId: "u_liam", name: "Liam", country: "US", plan: "free", betaUser: true },
+  { userId: "u_olivia", name: "Olivia", country: "UK", plan: "premium", betaUser: true },
+  { userId: "u_noah", name: "Noah", country: "UK", plan: "free", betaUser: false },
+];
+
+/** Synthetic QuickCart payment counters growing at about 30 req/s, for mock mode. */
+export function mockPaymentCounters() {
+  const elapsed = (Date.now() - mockStart) / 1000;
+  const total = 30 * elapsed;
+  return {
+    oldSuccess: Math.round(total * 0.75 * 0.99),
+    oldError: Math.round(total * 0.75 * 0.01),
+    newSuccess: Math.round(total * 0.25 * 0.995),
+    newError: Math.round(total * 0.25 * 0.005),
+    readAt: Date.now(),
+  };
+}
+
+const mockStart = Date.now() - 60_000;

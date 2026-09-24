@@ -1,7 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { eventStreamUrl, useMocks } from "../api/client";
-import type { Event as RolloutEvent, Flag, Health, Incident } from "../api/types";
+import type { Event as RolloutEvent, Flag, Health, HealthStatus, Incident } from "../api/types";
 
 const reconnectDelayMs = 3000;
 const pollingFallbackMs = 5000;
@@ -32,8 +32,10 @@ export function usePollingFallback(): number | false {
   return useStreamConnected() ? false : pollingFallbackMs;
 }
 
-interface StreamHandlers {
+export interface StreamHandlers {
   onIncident?: (incident: Incident) => void;
+  onRollout?: (event: RolloutEvent) => void;
+  onHealth?: (health: Health, previous: HealthStatus | undefined) => void;
 }
 
 function parse<T>(message: MessageEvent<string>): T | null {
@@ -112,11 +114,18 @@ export function useEventStream(handlers: StreamHandlers = {}) {
       });
       source.addEventListener("rollout", (message) => {
         const event = parse<RolloutEvent>(message);
-        if (event) applyRollout(queryClient, event);
+        if (!event) return;
+        applyRollout(queryClient, event);
+        // Refresh the all-flags activity lists (["events", key, limit]).
+        void queryClient.invalidateQueries({ queryKey: ["events", event.flagKey], exact: false, refetchType: "active" });
+        handlersRef.current.onRollout?.(event);
       });
       source.addEventListener("health", (message) => {
         const health = parse<Health>(message);
-        if (health) applyHealth(queryClient, health);
+        if (!health) return;
+        const previous = queryClient.getQueryData<Health>(["health", health.flagKey])?.status;
+        applyHealth(queryClient, health);
+        handlersRef.current.onHealth?.(health, previous);
       });
       source.addEventListener("incident", (message) => {
         const incident = parse<Incident>(message);

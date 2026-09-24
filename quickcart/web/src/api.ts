@@ -90,6 +90,40 @@ export function getPersonas(signal?: AbortSignal) {
   return getCollection<Persona>("/api/personas", "personas", signal);
 }
 
+/** Which payment flow a shopper's checkout will use, from GET /api/checkout-flow. */
+export interface CheckoutFlow {
+  flagKey: string;
+  flow: "old" | "new";
+  reason: string;
+  /** null when the platform could not be reached. */
+  rolloutPercentage: number | null;
+}
+
+export async function getCheckoutFlow(persona: Pick<Persona, "userId" | "country" | "plan" | "betaUser">, signal?: AbortSignal): Promise<CheckoutFlow> {
+  const query = new URLSearchParams({
+    userId: persona.userId,
+    country: persona.country,
+    plan: persona.plan,
+    betaUser: String(persona.betaUser),
+  });
+  let response: Response;
+  try {
+    response = await fetch(`${serverUrl}/api/checkout-flow?${query}`, { signal });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new Error("Unable to reach QuickCart. Check that its server is running.");
+  }
+  if (!response.ok) throw new Error(`QuickCart request failed (${response.status}).`);
+  const payload = await response.json() as Partial<CheckoutFlow>;
+  if (payload.flow !== "old" && payload.flow !== "new") throw new Error("QuickCart returned an invalid checkout flow.");
+  return {
+    flagKey: payload.flagKey ?? "new_payment_flow",
+    flow: payload.flow,
+    reason: typeof payload.reason === "string" ? payload.reason : "UNKNOWN",
+    rolloutPercentage: typeof payload.rolloutPercentage === "number" ? payload.rolloutPercentage : null,
+  };
+}
+
 export async function createPayment(request: PayRequest): Promise<PayResponse> {
   let response: Response;
   try {

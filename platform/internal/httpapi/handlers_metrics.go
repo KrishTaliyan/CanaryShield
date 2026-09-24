@@ -15,7 +15,7 @@ type metricsHandlers struct {
 	prometheus *monitoring.Client
 }
 
-// flagMetrics serves GET /flags/{key}/metrics?range=5m|15m|30m.
+// flagMetrics serves GET /flags/{key}/metrics?range=5m|15m|30m|1h|6h|24h.
 func (h *metricsHandlers) flagMetrics(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("range")
 	if name == "" {
@@ -23,7 +23,7 @@ func (h *metricsHandlers) flagMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	rng, step, ok := monitoring.ChartRange(name)
 	if !ok {
-		writeError(w, http.StatusUnprocessableEntity, CodeValidationFailed, "range must be 5m, 15m or 30m")
+		writeError(w, http.StatusUnprocessableEntity, CodeValidationFailed, "range must be 5m, 15m, 30m, 1h, 6h or 24h")
 		return
 	}
 

@@ -7,6 +7,7 @@ import type {
   GuardrailRequest,
   Health,
   Metrics,
+  MetricsRange,
   Overrides,
   PatchFlagRequest,
   PlaygroundEvaluationRequest,
@@ -95,7 +96,7 @@ export function getFlagHealth(key: string) {
   return apiRequest<Health>(`/flags/${encodeURIComponent(key)}/health`);
 }
 
-export function getFlagMetrics(key: string, range: "5m" | "15m" | "30m" = "5m") {
+export function getFlagMetrics(key: string, range: MetricsRange = "5m") {
   return apiRequest<Metrics>(`/flags/${encodeURIComponent(key)}/metrics?range=${range}`);
 }
 

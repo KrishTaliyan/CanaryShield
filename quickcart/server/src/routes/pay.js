@@ -24,8 +24,9 @@ router.post("/", async (request, response) => {
     });
   }
 
-  const evaluation = await evaluateFlag("new_payment_flow", user);
-  const flow = evaluation.variant === "new" ? "new" : "old";
+  const { variant, reason } = await evaluateFlag("new_payment_flow", user);
+  const evaluation = { variant, reason };
+  const flow = variant === "new" ? "new" : "old";
   const startedAt = performance.now();
   let payment;
   try {
