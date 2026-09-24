@@ -1,7 +1,7 @@
 import { mockApiRequest, MockApiError } from "../mocks/fixtures";
 import type { ApiErrorBody } from "./types";
 
-const platformUrl = (import.meta.env.VITE_PLATFORM_URL || "http://localhost:8080").replace(/\/$/, "");
+export const platformUrl = (import.meta.env.VITE_PLATFORM_URL || "http://localhost:8080").replace(/\/$/, "");
 export const adminToken = import.meta.env.VITE_ADMIN_TOKEN || "dev-admin-token";
 export const useMocks = import.meta.env.VITE_USE_MOCKS === "true";
 

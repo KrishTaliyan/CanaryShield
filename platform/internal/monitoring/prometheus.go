@@ -19,10 +19,14 @@ import (
 // queryTimeout is the Prometheus HTTP client timeout (README 9.8).
 const queryTimeout = 2 * time.Second
 
-// Requests per second per flow (README 8.7). These are not per flag.
+// Requests per second per flow (README 8.7) and p95 payment latency per flow,
+// from QuickCart's quickcart_payment_duration_seconds histogram. These are
+// not per flag.
 const (
-	rpsNewQuery = `sum(rate(quickcart_payment_requests_total{flow="new"}[30s]))`
-	rpsOldQuery = `sum(rate(quickcart_payment_requests_total{flow="old"}[30s]))`
+	rpsNewQuery        = `sum(rate(quickcart_payment_requests_total{flow="new"}[30s]))`
+	rpsOldQuery        = `sum(rate(quickcart_payment_requests_total{flow="old"}[30s]))`
+	latencyP95NewQuery = `histogram_quantile(0.95, sum by (le) (rate(quickcart_payment_duration_seconds_bucket{flow="new"}[30s])))`
+	latencyP95OldQuery = `histogram_quantile(0.95, sum by (le) (rate(quickcart_payment_duration_seconds_bucket{flow="old"}[30s])))`
 )
 
 // Chart ranges accepted by GET /flags/{key}/metrics, each with a step that
@@ -31,6 +35,9 @@ var chartRanges = map[string]struct{ rng, step time.Duration }{
 	"5m":  {5 * time.Minute, 5 * time.Second},
 	"15m": {15 * time.Minute, 15 * time.Second},
 	"30m": {30 * time.Minute, 30 * time.Second},
+	"1h":  {time.Hour, time.Minute},
+	"6h":  {6 * time.Hour, 6 * time.Minute},
+	"24h": {24 * time.Hour, 24 * time.Minute},
 }
 
 // Point is one chart sample: [unixSeconds, value].
@@ -119,7 +126,8 @@ func ChartRange(name string) (rng, step time.Duration, ok bool) {
 	return r.rng, r.step, ok
 }
 
-// FlagMetrics returns the four chart series for a flag, querying them in
+// FlagMetrics returns the chart series for a flag (error rates, requests per
+// second and p95 latency, each for the new and old flow), querying them in
 // parallel.
 func (c *Client) FlagMetrics(ctx context.Context, f models.Flag, rng, step time.Duration) (Metrics, error) {
 	queries := map[string]string{
@@ -127,6 +135,8 @@ func (c *Client) FlagMetrics(ctx context.Context, f models.Flag, rng, step time.
 		"baselineErrorRate": f.Guardrail.BaselineErrorQuery,
 		"rpsNew":            rpsNewQuery,
 		"rpsOld":            rpsOldQuery,
+		"latencyP95New":     latencyP95NewQuery,
+		"latencyP95Old":     latencyP95OldQuery,
 	}
 
 	var mu sync.Mutex

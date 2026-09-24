@@ -2,16 +2,119 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Design tokens: RGB triplets so Tailwind can apply opacity (rgb(var(--x) / a)). */
 :root {
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  color: #17211e;
-  background: #f7f9f8;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  color-scheme: light;
+  --bg: 246 244 239;
+  --surface: 251 250 247;
+  --surface-2: 255 255 255;
+  --sunken: 238 235 228;
+  --border: 226 221 211;
+  --text: 28 33 30;
+  --text-muted: 84 92 88;
+  --text-subtle: 107 114 110;
+  --brand: 21 128 90;
+  --brand-hover: 17 107 75;
+  --brand-fg: 255 255 255;
+  --brand-soft: 220 242 232;
+  --saffron: 166 86 4;
+  --saffron-soft: 253 236 212;
+  --danger: 196 43 43;
+  --danger-soft: 252 228 228;
+  --success: 21 128 90;
+  --success-soft: 220 244 231;
+  --info: 37 99 190;
+  --info-soft: 222 234 252;
+  --shadow-raised: 6px 6px 16px rgb(186 177 160 / 0.42), -6px -6px 16px rgb(255 255 255 / 0.9);
+  --shadow-raised-sm: 3px 3px 8px rgb(186 177 160 / 0.4), -3px -3px 8px rgb(255 255 255 / 0.85);
+  --shadow-inset: inset 3px 3px 7px rgb(186 177 160 / 0.42), inset -3px -3px 7px rgb(255 255 255 / 0.9);
+  --shadow-float: 0 24px 60px -18px rgb(40 34 20 / 0.35), 0 8px 20px -10px rgb(40 34 20 / 0.2);
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-body {
-  min-width: 320px;
-  min-height: 100vh;
-  margin: 0;
+.dark {
+  color-scheme: dark;
+  --bg: 18 21 20;
+  --surface: 25 29 27;
+  --surface-2: 32 37 35;
+  --sunken: 15 18 17;
+  --border: 46 53 50;
+  --text: 236 238 236;
+  --text-muted: 176 184 180;
+  --text-subtle: 136 144 140;
+  --brand: 58 198 144;
+  --brand-hover: 88 214 164;
+  --brand-fg: 8 30 21;
+  --brand-soft: 22 54 42;
+  --saffron: 245 170 80;
+  --saffron-soft: 58 42 20;
+  --danger: 244 116 116;
+  --danger-soft: 64 28 28;
+  --success: 72 204 136;
+  --success-soft: 22 54 38;
+  --info: 120 168 244;
+  --info-soft: 26 38 62;
+  --shadow-raised: 6px 6px 16px rgb(0 0 0 / 0.5), -5px -5px 14px rgb(255 255 255 / 0.035);
+  --shadow-raised-sm: 3px 3px 8px rgb(0 0 0 / 0.45), -3px -3px 8px rgb(255 255 255 / 0.03);
+  --shadow-inset: inset 3px 3px 7px rgb(0 0 0 / 0.5), inset -3px -3px 7px rgb(255 255 255 / 0.03);
+  --shadow-float: 0 24px 60px -18px rgb(0 0 0 / 0.7), 0 8px 20px -10px rgb(0 0 0 / 0.5);
+}
+
+@layer base {
+  html {
+    font-family: Inter, "Segoe UI Variable Text", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    background: rgb(var(--bg));
+    color: rgb(var(--text));
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    min-width: 320px;
+    min-height: 100vh;
+    margin: 0;
+    background: rgb(var(--bg));
+  }
+  :focus-visible {
+    outline: 2px solid rgb(var(--brand));
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+}
+
+@layer components {
+  .surface {
+    background: rgb(var(--surface));
+    border: 1px solid rgb(var(--border) / 0.7);
+    border-radius: 20px;
+    box-shadow: var(--shadow-raised);
+  }
+  .well {
+    background: rgb(var(--sunken));
+    border: 1px solid rgb(var(--border) / 0.6);
+    border-radius: 12px;
+    box-shadow: var(--shadow-inset);
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  .skeleton {
+    background: linear-gradient(90deg, rgb(var(--sunken)) 0%, rgb(var(--surface-2)) 50%, rgb(var(--sunken)) 100%);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+    border-radius: 12px;
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -5,12 +5,27 @@ const requestTimeoutMs = 50;
 const evaluations = new Map();
 
 function stableResult() {
-  return { variant: "old", reason: "PLATFORM_UNAVAILABLE" };
+  return { variant: "old", reason: "PLATFORM_UNAVAILABLE", rolloutPercentage: null };
+}
+
+function rolloutOf(result) {
+  return typeof result.rolloutPercentage === "number" ? result.rolloutPercentage : null;
 }
 
 function pruneExpired(now) {
   for (const [key, entry] of evaluations) {
     if (entry.expiresAt <= now) evaluations.delete(key);
+  }
+}
+
+// warmUpFlagClient opens the first connection to the platform at startup, so
+// the first real evaluation does not spend its 50 ms budget on setup. It hits
+// /healthz because an evaluation would count in metrics and exposure.
+export async function warmUpFlagClient() {
+  try {
+    await fetch(`${platformUrl}/healthz`, { signal: AbortSignal.timeout(2000) });
+  } catch {
+    // The platform may start later; evaluations fall back to the old flow.
   }
 }
 
@@ -35,9 +50,9 @@ export async function evaluateFlag(flagKey, context) {
     if (response.ok) {
       const result = await response.json();
       if (["old", "new"].includes(result.variant) && typeof result.reason === "string") {
-        value = { variant: result.variant, reason: result.reason };
+        value = { variant: result.variant, reason: result.reason, rolloutPercentage: rolloutOf(result) };
       } else if (result.variant === "off" && typeof result.reason === "string") {
-        value = { variant: "old", reason: result.reason };
+        value = { variant: "old", reason: result.reason, rolloutPercentage: rolloutOf(result) };
       }
     }
   } catch {
