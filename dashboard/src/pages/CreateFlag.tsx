@@ -1,13 +1,15 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useOutletContext } from "react-router-dom";
 import { createFlag } from "../api/flags";
+import type { LayoutContext } from "../components/Layout";
 
 const keyPattern = "[a-z0-9_]{3,64}";
 
 export default function CreateFlag() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { notify } = useOutletContext<LayoutContext>();
   const [key, setKey] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -15,6 +17,7 @@ export default function CreateFlag() {
     mutationFn: createFlag,
     onSuccess: async (flag) => {
       await queryClient.invalidateQueries({ queryKey: ["flags"] });
+      notify(`Flag ${flag.key} created`);
       navigate(`/flags/${encodeURIComponent(flag.key)}`);
     },
   });

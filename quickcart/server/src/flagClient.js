@@ -14,6 +14,17 @@ function pruneExpired(now) {
   }
 }
 
+// warmUpFlagClient opens the first connection to the platform at startup, so
+// the first real evaluation does not spend its 50 ms budget on setup. It hits
+// /healthz because an evaluation would count in metrics and exposure.
+export async function warmUpFlagClient() {
+  try {
+    await fetch(`${platformUrl}/healthz`, { signal: AbortSignal.timeout(2000) });
+  } catch {
+    // The platform may start later; evaluations fall back to the old flow.
+  }
+}
+
 export async function evaluateFlag(flagKey, context) {
   const now = Date.now();
   pruneExpired(now);

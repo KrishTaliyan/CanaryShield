@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
+import { useOutletContext } from "react-router-dom";
 import { getProducts, type Product } from "../api";
+import type { StoreContext } from "../App";
 import { useCart } from "../cart";
 
 const foodVisuals: Record<string, { emoji: string; background: string }> = {
@@ -17,6 +19,7 @@ const currency = new Intl.NumberFormat("en-IN", { style: "currency", currency: "
 
 export default function Products() {
   const { addProduct } = useCart();
+  const { notify } = useOutletContext<StoreContext>();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +81,10 @@ export default function Products() {
                     <button
                       aria-label={`Add ${product.name} to cart`}
                       className="rounded bg-emerald-800 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-900"
-                      onClick={() => addProduct(product)}
+                      onClick={() => {
+                        addProduct(product);
+                        notify(`Added ${product.name} to your cart`);
+                      }}
                       type="button"
                     >Add</button>
                   </div>

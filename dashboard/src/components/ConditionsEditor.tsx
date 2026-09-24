@@ -1,7 +1,9 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useOutletContext } from "react-router-dom";
 import { setConditions } from "../api/flags";
 import type { Condition, ConditionOperator } from "../api/types";
+import type { LayoutContext } from "./Layout";
 
 interface ConditionDraft {
   attribute: string;
@@ -60,15 +62,17 @@ function compileConditions(drafts: ConditionDraft[]): Condition[] {
 }
 
 export default function ConditionsEditor({ flagKey, conditions }: ConditionsEditorProps) {
+  const { notify } = useOutletContext<LayoutContext>();
   const queryClient = useQueryClient();
   const [drafts, setDrafts] = useState(() => toDrafts(conditions));
   const [validationError, setValidationError] = useState<string | null>(null);
   const mutation = useMutation({
     mutationFn: ({ key, value }: { key: string; value: Condition[] }) => setConditions(key, value),
     onSuccess: async () => {
+      notify("Conditions saved");
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["flags", flagKey] }),
         queryClient.invalidateQueries({ queryKey: ["flags"] }),
+        queryClient.invalidateQueries({ queryKey: ["events", flagKey] }),
       ]);
     },
   });

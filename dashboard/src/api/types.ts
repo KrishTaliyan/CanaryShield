@@ -2,6 +2,7 @@ declare global {
   interface ImportMetaEnv {
     readonly VITE_PLATFORM_URL?: string;
     readonly VITE_ADMIN_TOKEN?: string;
+    readonly VITE_QUICKCART_URL?: string;
     readonly VITE_USE_MOCKS?: string;
   }
 
@@ -146,6 +147,13 @@ export interface ChaosConfig {
   latencyRate: number;
   durationSec: number;
   activeUntil: string | null;
+}
+
+export interface ChaosRequest {
+  errorRate: number;
+  latencyMs?: number;
+  latencyRate?: number;
+  durationSec?: number;
 }
 
 export interface ApiErrorBody {

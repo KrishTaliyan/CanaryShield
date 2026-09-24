@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { useFlags } from "../hooks/useFlags";
+import HealthBadge from "../components/HealthBadge";
 import StatusBadge from "../components/StatusBadge";
 
 function formatUpdatedAt(value: string) {
@@ -82,7 +83,7 @@ export default function FlagsList() {
                   </td>
                   <td className="px-4 py-4"><StatusBadge status={flag.status} /></td>
                   <td className="px-4 py-4 text-right tabular-nums">{flag.rolloutPercentage}%</td>
-                  <td className="px-4 py-4 text-neutral-700">{flag.healthStatus}</td>
+                  <td className="px-4 py-4"><HealthBadge flagKey={flag.key} fallbackStatus={flag.healthStatus} /></td>
                   <td className="whitespace-nowrap px-4 py-4 text-neutral-600">{formatUpdatedAt(flag.updatedAt)}</td>
                 </tr>
               ))}

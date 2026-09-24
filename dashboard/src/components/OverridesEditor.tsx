@@ -1,7 +1,9 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useOutletContext } from "react-router-dom";
 import { setOverrides } from "../api/flags";
 import type { Overrides } from "../api/types";
+import type { LayoutContext } from "./Layout";
 
 interface OverridesEditorProps {
   flagKey: string;
@@ -13,15 +15,17 @@ const toText = (users: string[]) => users.join("\n");
 const toUsers = (value: string) => value.split(/[\n,]/).map((userId) => userId.trim()).filter(Boolean);
 
 export default function OverridesEditor({ flagKey, overrides }: OverridesEditorProps) {
+  const { notify } = useOutletContext<LayoutContext>();
   const queryClient = useQueryClient();
   const [include, setInclude] = useState(() => toText(overrides.include));
   const [exclude, setExclude] = useState(() => toText(overrides.exclude));
   const mutation = useMutation({
     mutationFn: ({ key, overrides: value }: { key: string; overrides: Overrides }) => setOverrides(key, value),
     onSuccess: async () => {
+      notify("Overrides saved");
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["flags", flagKey] }),
         queryClient.invalidateQueries({ queryKey: ["flags"] }),
+        queryClient.invalidateQueries({ queryKey: ["events", flagKey] }),
       ]);
     },
   });

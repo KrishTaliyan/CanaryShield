@@ -1,9 +1,20 @@
-import { Link, useParams } from "react-router-dom";
-import StatusBadge from "../components/StatusBadge";
-import RolloutRing from "../components/RolloutRing";
+import { useState } from "react";
+import { Link, useOutletContext, useParams } from "react-router-dom";
+import type { Flag } from "../api/types";
+import ChaosPanel from "../components/ChaosPanel";
 import ConditionsEditor from "../components/ConditionsEditor";
+import ErrorRateChart from "../components/ErrorRateChart";
+import EventTimeline from "../components/EventTimeline";
+import GuardrailForm from "../components/GuardrailForm";
+import HealthBadge from "../components/HealthBadge";
+import IncidentBanner from "../components/IncidentBanner";
+import type { LayoutContext } from "../components/Layout";
 import OverridesEditor from "../components/OverridesEditor";
-import { useFlag, useFlagActions } from "../hooks/useFlag";
+import RolloutRing from "../components/RolloutRing";
+import StatusBadge from "../components/StatusBadge";
+import TrafficChart from "../components/TrafficChart";
+import { useFlag, useFlagActions, type FlagAction } from "../hooks/useFlag";
+import { metricsRanges, useMetrics, type MetricsRange } from "../hooks/useMetrics";
 
 function formatTimestamp(value: string) {
   const date = new Date(value);
@@ -11,10 +22,84 @@ function formatTimestamp(value: string) {
   return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
+function describeAction(action: FlagAction, flag: Flag) {
+  switch (action.type) {
+    case "set":
+      return flag.status === "completed" ? "Rollout completed at 100%" : `Rollout set to ${flag.rolloutPercentage}%`;
+    case "rollback":
+      return "Flag rolled back to 0%";
+    case "kill":
+      return "Flag killed";
+    case "rollout":
+      switch (action.action) {
+        case "start":
+          return `Rollout started at ${flag.rolloutPercentage}%`;
+        case "advance":
+          return flag.status === "completed" ? "Rollout completed at 100%" : `Rollout advanced to ${flag.rolloutPercentage}%`;
+        case "pause":
+          return "Rollout paused";
+        case "resume":
+          return "Rollout resumed";
+      }
+  }
+}
+
+function CanaryCharts({ flagKey }: { flagKey: string }) {
+  const [range, setRange] = useState<MetricsRange>("5m");
+  const metricsQuery = useMetrics(flagKey, range);
+
+  return (
+    <section aria-labelledby="charts-heading" className="border-y border-neutral-200 bg-white p-5 md:p-6">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold text-neutral-950" id="charts-heading">Canary health</h2>
+        <div aria-label="Chart range" className="inline-flex rounded border border-neutral-300 p-0.5" role="group">
+          {metricsRanges.map((item) => (
+            <button
+              key={item}
+              aria-pressed={range === item}
+              className={`rounded px-3 py-1 text-sm font-medium ${range === item ? "bg-emerald-800 text-white" : "text-neutral-700 hover:bg-neutral-100"}`}
+              onClick={() => setRange(item)}
+              type="button"
+            >{item}</button>
+          ))}
+        </div>
+      </div>
+      {metricsQuery.isPending ? (
+        <div className="grid gap-6 xl:grid-cols-2" aria-busy="true" aria-label="Loading charts">
+          <div className="h-64 animate-pulse rounded bg-neutral-100" />
+          <div className="h-64 animate-pulse rounded bg-neutral-100" />
+        </div>
+      ) : metricsQuery.isError ? (
+        <div className="flex h-40 flex-col items-center justify-center gap-2 border border-dashed border-neutral-300 text-center" role="alert">
+          <p className="text-sm text-neutral-700">{metricsQuery.error.message}</p>
+          <p className="text-xs text-neutral-500">Charts need Prometheus; they retry every 5 seconds.</p>
+        </div>
+      ) : (
+        <div className="grid gap-6 xl:grid-cols-2">
+          <ErrorRateChart metrics={metricsQuery.data} />
+          <TrafficChart metrics={metricsQuery.data} />
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function FlagDetail() {
   const { key = "" } = useParams();
+  const { notify } = useOutletContext<LayoutContext>();
   const flagQuery = useFlag(key);
   const actions = useFlagActions(key);
+
+  async function runAction(action: FlagAction) {
+    try {
+      const flag = await actions.runAction(action);
+      if (flag) notify(describeAction(action, flag));
+      return flag;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "The action failed.", "error");
+      throw error;
+    }
+  }
 
   if (flagQuery.isPending) {
     return <main className="mx-auto max-w-6xl p-5 md:p-8" aria-busy="true">Loading flag…</main>;
@@ -38,18 +123,29 @@ export default function FlagDetail() {
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-semibold text-neutral-950">{flag.name}</h1>
             <StatusBadge status={flag.status} />
+            <HealthBadge flagKey={flag.key} fallbackStatus={flag.healthStatus} />
           </div>
           <p className="mt-1 font-mono text-sm text-neutral-600">{flag.key}</p>
           {flag.description && <p className="mt-3 max-w-2xl text-sm text-neutral-700">{flag.description}</p>}
         </div>
       </header>
 
+      <IncidentBanner flagKey={flag.key} />
+
       <RolloutRing
         error={actions.error?.message ?? null}
         flag={flag}
         isPending={actions.isPending}
-        onAction={actions.runAction}
+        onAction={runAction}
       />
+
+      <div className="mt-8 space-y-8">
+        <CanaryCharts flagKey={flag.key} />
+        <div className="grid gap-8 lg:grid-cols-2">
+          <ChaosPanel />
+          <EventTimeline flagKey={flag.key} />
+        </div>
+      </div>
 
       <section className="mt-8" aria-labelledby="configuration-heading">
         <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
@@ -67,7 +163,7 @@ export default function FlagDetail() {
           </div>
           <div className="border-b border-neutral-200 p-4 sm:border-r lg:border-r-0">
             <dt className="text-xs font-semibold uppercase text-neutral-500">Health</dt>
-            <dd className="mt-1 text-sm text-neutral-900">{flag.healthStatus}</dd>
+            <dd className="mt-1 text-sm text-neutral-900"><HealthBadge flagKey={flag.key} fallbackStatus={flag.healthStatus} /></dd>
           </div>
           <div className="border-b border-neutral-200 p-4 lg:border-r">
             <dt className="text-xs font-semibold uppercase text-neutral-500">Rollout steps</dt>
@@ -103,6 +199,7 @@ export default function FlagDetail() {
       </section>
 
       <div className="mt-8 space-y-8">
+        <GuardrailForm flagKey={flag.key} guardrail={flag.guardrail} />
         <ConditionsEditor flagKey={flag.key} conditions={flag.conditions} />
         <OverridesEditor flagKey={flag.key} overrides={flag.overrides} />
       </div>

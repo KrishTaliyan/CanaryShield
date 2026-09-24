@@ -1,4 +1,5 @@
 import type {
+  ChaosConfig,
   Condition,
   Event,
   EventType,
@@ -118,6 +119,22 @@ const healthByFlag = new Map<string, {
 }]]);
 
 let nextEventId = 43;
+
+let chaos: ChaosConfig = inactiveChaos();
+
+function inactiveChaos(): ChaosConfig {
+  return { active: false, errorRate: 0, latencyMs: 0, latencyRate: 0, durationSec: 120, activeUntil: null };
+}
+
+// mockMetricSeries returns points ending now, so charts look live in mock mode.
+function mockMetricSeries(rangeSeconds: number, stepSeconds: number, base: number, wobble: number) {
+  const end = Math.floor(Date.now() / 1000 / stepSeconds) * stepSeconds;
+  const points: Array<[number, number]> = [];
+  for (let t = end - rangeSeconds; t <= end; t += stepSeconds) {
+    points.push([t, Math.max(0, base + wobble * Math.sin(t / 37))]);
+  }
+  return points;
+}
 
 function fail(message: string, code: string, status: number): never {
   throw new MockApiError(message, code, status);
@@ -465,16 +482,18 @@ export async function mockApiRequest<T>(path: string, options: RequestInit = {})
       } else if (suffix === "metrics" && method === "GET") {
         const range = new URLSearchParams(queryString).get("range") || "5m";
         const rangeSeconds = range === "15m" ? 900 : range === "30m" ? 1800 : 300;
+        const stepSeconds = rangeSeconds / 60;
+        const share = flag.rolloutPercentage / 100;
         result = {
           flagKey: key,
           threshold: flag.guardrail.errorRateThreshold,
           rangeSeconds,
-          stepSeconds: 5,
+          stepSeconds,
           series: {
-            canaryErrorRate: [[1727172000, 0.012], [1727172005, 0.12]],
-            baselineErrorRate: [[1727172000, 0.01], [1727172005, 0.01]],
-            rpsNew: [[1727172000, 7.5], [1727172005, 8.1]],
-            rpsOld: [[1727172000, 22.1], [1727172005, 21.9]],
+            canaryErrorRate: share > 0 ? mockMetricSeries(rangeSeconds, stepSeconds, 0.008, 0.006) : [],
+            baselineErrorRate: mockMetricSeries(rangeSeconds, stepSeconds, 0.01, 0.003),
+            rpsNew: share > 0 ? mockMetricSeries(rangeSeconds, stepSeconds, 30 * share, 0.6) : [],
+            rpsOld: mockMetricSeries(rangeSeconds, stepSeconds, 30 * (1 - share), 0.8),
           },
         };
       } else if (suffix === "events" && method === "GET") {
@@ -494,4 +513,36 @@ export async function mockApiRequest<T>(path: string, options: RequestInit = {})
   }
 
   return copy(result) as T;
+}
+
+export async function mockChaosRequest(options: RequestInit = {}): Promise<ChaosConfig> {
+  const method = (options.method || "GET").toUpperCase();
+  if (chaos.activeUntil && Date.parse(chaos.activeUntil) <= Date.now()) chaos = inactiveChaos();
+
+  if (method === "POST") {
+    const body = readBody(options);
+    const errorRate = Number(body.errorRate);
+    const latencyMs = Number(body.latencyMs ?? 0);
+    const latencyRate = Number(body.latencyRate ?? 0);
+    const durationSec = Number(body.durationSec ?? 120);
+    if (
+      !Number.isFinite(errorRate) || errorRate < 0 || errorRate > 1
+      || !Number.isInteger(latencyMs) || latencyMs < 0 || latencyMs > 5000
+      || !Number.isFinite(latencyRate) || latencyRate < 0 || latencyRate > 1
+      || !Number.isInteger(durationSec) || durationSec < 10 || durationSec > 600
+    ) {
+      fail("Chaos values are outside the allowed range.", "BAD_REQUEST", 400);
+    }
+    chaos = {
+      active: true,
+      errorRate,
+      latencyMs,
+      latencyRate,
+      durationSec,
+      activeUntil: new Date(Date.now() + durationSec * 1000).toISOString(),
+    };
+  } else if (method === "DELETE") {
+    chaos = inactiveChaos();
+  }
+  return copy(chaos);
 }

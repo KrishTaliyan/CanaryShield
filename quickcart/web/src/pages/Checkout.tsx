@@ -7,7 +7,7 @@ import { usePersona } from "../components/PersonaSwitcher";
 const currency = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 });
 
 export default function Checkout() {
-  const { items, totalItems, totalPrice } = useCart();
+  const { items, totalItems, totalPrice, clearCart } = useCart();
   const { selectedPersona, loading: loadingPersonas, error: personaError } = usePersona();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -28,6 +28,8 @@ export default function Checkout() {
         items: items.map(({ product, quantity }) => ({ productId: product.id, qty: quantity })),
         amount: totalPrice,
       });
+      // Keep the cart after a failed payment so the shopper can try again.
+      if (result.status === "confirmed") clearCart();
       navigate("/confirmation", { state: { payment: result } });
     } catch (requestError: unknown) {
       setError(requestError instanceof Error ? requestError.message : "Payment could not be submitted.");

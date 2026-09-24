@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   advanceRollout,
   getFlag,
+  getFlagEvents,
+  getFlagHealth,
   killFlag,
   pauseRollout,
   resumeRollout,
@@ -9,6 +11,9 @@ import {
   setRolloutPercentage,
   startRollout,
 } from "../api/flags";
+import { usePollingFallback } from "./useEventStream";
+
+const healthPollMs = 5000;
 
 export type FlagAction =
   | { type: "rollout"; action: "start" | "advance" | "pause" | "resume" }
@@ -17,10 +22,33 @@ export type FlagAction =
   | { type: "kill" };
 
 export function useFlag(key: string) {
+  const refetchInterval = usePollingFallback();
   return useQuery({
     queryKey: ["flags", key],
     queryFn: () => getFlag(key),
     enabled: Boolean(key),
+    refetchInterval,
+  });
+}
+
+/** The guardian's latest health record, polled every 5 seconds. */
+export function useFlagHealth(key: string) {
+  return useQuery({
+    queryKey: ["health", key],
+    queryFn: () => getFlagHealth(key),
+    enabled: Boolean(key),
+    refetchInterval: healthPollMs,
+  });
+}
+
+/** The flag's rollout history, newest first. */
+export function useFlagEvents(key: string) {
+  const refetchInterval = usePollingFallback();
+  return useQuery({
+    queryKey: ["events", key],
+    queryFn: () => getFlagEvents(key),
+    enabled: Boolean(key),
+    refetchInterval,
   });
 }
 
@@ -50,8 +78,8 @@ export function useFlagActions(key: string) {
     },
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["flags", key] }),
         queryClient.invalidateQueries({ queryKey: ["flags"] }),
+        queryClient.invalidateQueries({ queryKey: ["events", key] }),
       ]);
     },
   });

@@ -14,6 +14,7 @@ interface CartValue {
   addProduct: (product: Product) => void;
   setQuantity: (productId: string, quantity: number) => void;
   removeProduct: (productId: string) => void;
+  clearCart: () => void;
 }
 
 const CartContext = createContext<CartValue | null>(null);
@@ -35,6 +36,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
       ? current.filter((line) => line.product.id !== productId)
       : current.map((line) => line.product.id === productId ? { ...line, quantity } : line)),
     removeProduct: (productId) => setItems((current) => current.filter((line) => line.product.id !== productId)),
+    clearCart: () => setItems([]),
   }), [items]);
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;

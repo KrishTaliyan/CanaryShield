@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, Route, Routes } from "react-router-dom";
 import Cart from "./pages/Cart";
 import Checkout from "./pages/Checkout";
@@ -6,8 +7,29 @@ import Products from "./pages/Products";
 import { CartProvider, useCart } from "./cart";
 import PersonaSwitcher, { PersonaProvider } from "./components/PersonaSwitcher";
 
+/** Context that store pages rendered in the layout's Outlet receive. */
+export interface StoreContext {
+  notify: (message: string) => void;
+}
+
+const toastDurationMs = 2500;
+
 function StoreLayout() {
   const { totalItems } = useCart();
+  const [toast, setToast] = useState<{ id: number; message: string } | null>(null);
+  const nextId = useRef(1);
+
+  const notify = useCallback((message: string) => {
+    setToast({ id: nextId.current++, message });
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), toastDurationMs);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  const context: StoreContext = { notify };
 
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
@@ -24,16 +46,23 @@ function StoreLayout() {
           </div>
         </div>
       </header>
-      <Outlet />
+      <Outlet context={context} />
+      <div aria-live="polite" className="pointer-events-none fixed bottom-4 left-1/2 z-50 w-[min(22rem,calc(100vw-2rem))] -translate-x-1/2">
+        {toast && (
+          <p key={toast.id} className="rounded border border-emerald-300 bg-emerald-50 px-4 py-3 text-center text-sm font-medium text-emerald-900 shadow-lg" role="status">
+            {toast.message}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
 
 function NotFound() {
   return (
-    <main className="min-h-screen p-6">
-      <p>Page not found.</p>
-      <Link className="underline" to="/">Return to store</Link>
+    <main className="mx-auto max-w-3xl px-4 py-10 sm:px-6 lg:px-8">
+      <h1 className="text-2xl font-semibold text-neutral-950">Page not found</h1>
+      <Link className="mt-4 inline-flex text-sm font-medium text-emerald-800 underline" to="/">Return to menu</Link>
     </main>
   );
 }
