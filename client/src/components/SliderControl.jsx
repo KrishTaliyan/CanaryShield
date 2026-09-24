@@ -1,33 +1,38 @@
-function SliderControl({ value, onChange }) {
+function SliderControl({
+  label = "Rollout Percentage",
+  value,
+  onChange,
+  min = 0,
+  max = 100,
+  suffix = "%",
+}) {
   return (
-    <div className="rounded-xl border border-gray-700 bg-gray-950/70 p-4 shadow-lg">
-      <div className="mb-3 flex items-center justify-between">
+    <section className="rounded-lg border border-[rgb(var(--line))] bg-[rgb(var(--panel-2))] p-4">
+      <div className="mb-4 flex items-center justify-between gap-4">
         <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-gray-400">
-            Rollout Percentage
-          </p>
-          <p className="text-sm text-gray-500">Deterministic bucket: userId % 100</p>
+          <h3 className="text-sm font-bold text-[rgb(var(--text))]">{label}</h3>
+          <p className="mt-1 text-xs text-[rgb(var(--muted))]">userId % 100</p>
         </div>
-        <span className="rounded-lg bg-cyan-400/10 px-3 py-1 text-xl font-bold text-cyan-200">
-          {value}%
+        <span className="rounded-lg bg-cyan-400/10 px-3 py-1 text-2xl font-black text-cyan-400">
+          {value.toLocaleString()}
+          {suffix}
         </span>
       </div>
+
       <input
         type="range"
-        min="0"
-        max="100"
+        min={min}
+        max={max}
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
         className="feature-range w-full"
       />
-      <div className="mt-2 flex justify-between text-xs text-gray-500">
-        <span>0</span>
-        <span>25</span>
-        <span>50</span>
-        <span>75</span>
-        <span>100</span>
+
+      <div className="mt-3 flex justify-between text-xs text-[rgb(var(--muted))]">
+        <span>{min.toLocaleString()}</span>
+        <span>{max.toLocaleString()}</span>
       </div>
-    </div>
+    </section>
   );
 }
 

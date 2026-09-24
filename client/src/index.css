@@ -3,14 +3,37 @@
 @tailwind utilities;
 
 @layer base {
+  :root,
+  .theme-dark {
+    --page: 9 14 24;
+    --panel: 17 24 39;
+    --panel-2: 15 23 42;
+    --field: 2 6 23;
+    --text: 248 250 252;
+    --muted: 148 163 184;
+    --line: 51 65 85;
+    --track: 30 41 59;
+  }
+
+  .theme-light {
+    --page: 241 245 249;
+    --panel: 255 255 255;
+    --panel-2: 248 250 252;
+    --field: 241 245 249;
+    --text: 15 23 42;
+    --muted: 71 85 105;
+    --line: 203 213 225;
+    --track: 226 232 240;
+  }
+
   html {
-    background: #111827;
+    background: rgb(var(--page));
   }
 
   body {
     min-width: 320px;
     margin: 0;
-    background: #111827;
+    background: rgb(var(--page));
     font-family:
       Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
       sans-serif;
@@ -35,7 +58,7 @@
     width: 1.25rem;
     height: 1.25rem;
     appearance: none;
-    border: 3px solid #111827;
+    border: 3px solid rgb(var(--panel));
     border-radius: 999px;
     background: #f8fafc;
     box-shadow: 0 0 0 5px rgba(34, 211, 238, 0.18);
@@ -44,7 +67,7 @@
   .feature-range::-moz-range-thumb {
     width: 1.25rem;
     height: 1.25rem;
-    border: 3px solid #111827;
+    border: 3px solid rgb(var(--panel));
     border-radius: 999px;
     background: #f8fafc;
     box-shadow: 0 0 0 5px rgba(34, 211, 238, 0.18);
@@ -53,11 +76,7 @@
 
 @layer utilities {
   .checkout-enter {
-    animation: checkout-enter 520ms ease-out both;
-  }
-
-  .animate-progress {
-    animation: progress-sweep 1.6s ease-in-out infinite;
+    animation: checkout-enter 420ms ease-out both;
   }
 }
 
@@ -69,20 +88,5 @@
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes progress-sweep {
-  0% {
-    width: 18%;
-    transform: translateX(-30%);
-  }
-  50% {
-    width: 72%;
-    transform: translateX(18%);
-  }
-  100% {
-    width: 18%;
-    transform: translateX(560%);
   }
 }
